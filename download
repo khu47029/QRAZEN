@@ -1,0 +1,12 @@
+.local_storage/
+.test_db/
+node_modules/
+.next/
+.env
+.env.local
+.env*.local
+qr_platform.db
+qr_platform.db-shm
+qr_platform.db-wal
+.claude/
+.gemini/
