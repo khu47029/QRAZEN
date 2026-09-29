@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { verifyUserPassword } from "@/lib/auth/user-queries";
-import { setSessionCookie } from "@/lib/auth/session";
-import { checkRateLimit } from "@/lib/security/rate-limit";
-import { runMigrations } from "@/db/migrate";
+import { setSessionCookie, createSession, getClientIp } from "@/lib/auth/session";
+import { checkPersistentAuthRateLimit, recordPersistentAuthAttempt } from "@/lib/security/rate-limit";
+import { hashIpDaily } from "@/lib/security/crypto";
 
 const schema = z.object({
   email: z.string().email().max(255),
@@ -11,12 +11,14 @@ const schema = z.object({
 });
 
 export async function POST(req: NextRequest) {
-  // Rate limit: 10 attempts per 15 minutes per IP
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  const rateResult = checkRateLimit(`login:${ip}`, 10, 900);
+  const ip = getClientIp(req);
+  const ipHash = ip !== "unknown" ? hashIpDaily(ip) : "unknown";
+
+  // Persistent distributed rate limit: 10 attempts per 15 minutes across all serverless instances
+  const rateResult = await checkPersistentAuthRateLimit("login", ipHash, 10, 15);
   if (!rateResult.allowed) {
     return NextResponse.json(
-      { error: "Too many login attempts. Please wait and try again." },
+      { error: `Too many login attempts. Please wait ${rateResult.waitMinutes ?? 15} minute(s) and try again.` },
       { status: 429 }
     );
   }
@@ -34,10 +36,12 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await runMigrations();
     const user = await verifyUserPassword(parsed.data.email, parsed.data.password);
 
     if (!user) {
+      // Record failed attempt persistently in database
+      await recordPersistentAuthAttempt("login", ipHash, false);
+
       // Use generic message — don't reveal whether email exists
       return NextResponse.json(
         { error: "Invalid email or password." },
@@ -45,7 +49,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await setSessionCookie(user.id);
+    // Record successful attempt in database
+    await recordPersistentAuthAttempt("login", ipHash, true);
+
+    const sessionToken = await createSession(user.id, {
+      userAgent: req.headers.get("user-agent") ?? undefined,
+      ipHash: ip !== "unknown" ? ipHash : undefined,
+    });
+
+    await setSessionCookie(sessionToken);
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("Login error:", err);

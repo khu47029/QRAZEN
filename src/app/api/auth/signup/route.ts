@@ -3,10 +3,9 @@ import { z } from "zod";
 import { db } from "@/db";
 import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { generateId, hashPassword } from "@/lib/security/crypto";
-import { setSessionCookie } from "@/lib/auth/session";
-import { checkRateLimit } from "@/lib/security/rate-limit";
-import { runMigrations } from "@/db/migrate";
+import { generateId, hashPassword, hashIpDaily } from "@/lib/security/crypto";
+import { setSessionCookie, createSession, getClientIp } from "@/lib/auth/session";
+import { checkPersistentAuthRateLimit, recordPersistentAuthAttempt } from "@/lib/security/rate-limit";
 
 const schema = z.object({
   name: z.string().min(1).max(100),
@@ -15,12 +14,14 @@ const schema = z.object({
 });
 
 export async function POST(req: NextRequest) {
-  // Rate limit signup attempts: 5 per 15 minutes per IP
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  const rateResult = checkRateLimit(`signup:${ip}`, 5, 900);
+  const ip = getClientIp(req);
+  const ipHash = ip !== "unknown" ? hashIpDaily(ip) : "unknown";
+
+  // Persistent distributed rate limit: 5 signups per 15 minutes across all serverless instances
+  const rateResult = await checkPersistentAuthRateLimit("signup", ipHash, 5, 15);
   if (!rateResult.allowed) {
     return NextResponse.json(
-      { error: "Too many requests. Please wait before trying again." },
+      { error: `Too many registration attempts. Please wait ${rateResult.waitMinutes ?? 15} minute(s) and try again.` },
       { status: 429 }
     );
   }
@@ -43,9 +44,6 @@ export async function POST(req: NextRequest) {
   const { name, email, password } = parsed.data;
 
   try {
-    // Ensure database is initialized
-    await runMigrations();
-
     // Check if email already exists
     const [existing] = await db
       .select()
@@ -53,6 +51,9 @@ export async function POST(req: NextRequest) {
       .where(eq(users.email, email.toLowerCase().trim()));
 
     if (existing) {
+      // Record failed attempt in database
+      await recordPersistentAuthAttempt("signup", ipHash, false);
+
       return NextResponse.json(
         { error: "An account with this email already exists." },
         { status: 409 }
@@ -70,7 +71,15 @@ export async function POST(req: NextRequest) {
       plan: "free",
     });
 
-    await setSessionCookie(id);
+    // Record successful attempt in database
+    await recordPersistentAuthAttempt("signup", ipHash, true);
+
+    const sessionToken = await createSession(id, {
+      userAgent: req.headers.get("user-agent") ?? undefined,
+      ipHash: ip !== "unknown" ? ipHash : undefined,
+    });
+
+    await setSessionCookie(sessionToken);
 
     return NextResponse.json({ success: true }, { status: 201 });
   } catch (err) {

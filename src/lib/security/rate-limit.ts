@@ -1,6 +1,11 @@
+import { db } from "@/db";
+import { passwordAttempts, authAttempts } from "@/db/schema";
+import { eq, and, desc, gte } from "drizzle-orm";
+import { generateId } from "./crypto";
+
 /**
- * In-memory / Redis-ready Token Bucket & Lockout Rate Limiter.
- * Tracks password attempts, QR creation, and uploads per IP / identifier.
+ * Token Bucket & Lockout Rate Limiter with In-Memory Optimization and Postgres Persistence.
+ * Tracks authentication attempts, QR creation, and uploads per IP / identifier.
  */
 
 interface RateLimitRecord {
@@ -19,7 +24,7 @@ export interface RateLimitResult {
 }
 
 /**
- * Checks rate limit for an action.
+ * Checks in-memory rate limit for an action (fast-tier).
  */
 export function checkRateLimit(
   key: string,
@@ -115,4 +120,135 @@ export function isPasswordLocked(qrKey: string): { locked: boolean; remainingSec
   // Lock expired, reset record
   rateLimitStore.delete(key);
   return { locked: false };
+}
+
+/**
+ * Persistent QR viewer password verification check across serverless instances.
+ */
+export async function checkPersistentQrLockout(
+  qrCodeId: string,
+  ipHash: string
+): Promise<{ locked: boolean; remainingSeconds?: number }> {
+  // First check fast in-memory tier
+  const memCheck = isPasswordLocked(`${qrCodeId}:${ipHash}`);
+  if (memCheck.locked) return memCheck;
+
+  try {
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const attempts = await db
+      .select()
+      .from(passwordAttempts)
+      .where(
+        and(
+          eq(passwordAttempts.qrCodeId, qrCodeId),
+          eq(passwordAttempts.ipHash, ipHash),
+          eq(passwordAttempts.success, false),
+          gte(passwordAttempts.attemptedAt, fifteenMinutesAgo)
+        )
+      )
+      .orderBy(desc(passwordAttempts.attemptedAt));
+
+    if (attempts.length >= 5) {
+      const mostRecent = attempts[0]?.attemptedAt;
+      if (mostRecent) {
+        const lockExpiry = new Date(mostRecent).getTime() + 15 * 60 * 1000;
+        const remaining = Math.ceil((lockExpiry - Date.now()) / 1000);
+        if (remaining > 0) {
+          return { locked: true, remainingSeconds: remaining };
+        }
+      }
+    }
+  } catch {
+    // Fall back to in-memory check if DB fails
+  }
+
+  return { locked: false };
+}
+
+/**
+ * Records an attempt persistently in the database for QR viewer protection.
+ */
+export async function recordPersistentQrAttempt(
+  qrCodeId: string,
+  ipHash: string,
+  success: boolean
+): Promise<void> {
+  try {
+    await db.insert(passwordAttempts).values({
+      id: generateId(),
+      qrCodeId,
+      ipHash,
+      success,
+    });
+  } catch (err) {
+    console.error("recordPersistentQrAttempt error:", err);
+  }
+}
+
+/**
+ * Persistent distributed rate limiting and brute-force protection for login/signup across serverless instances.
+ */
+export async function checkPersistentAuthRateLimit(
+  target: "login" | "signup",
+  ipHash: string,
+  maxAttempts = 10,
+  windowMinutes = 15
+): Promise<{ allowed: boolean; remaining: number; waitMinutes?: number }> {
+  // Check fast in-memory tier first
+  const mem = checkRateLimit(`auth_${target}:${ipHash}`, maxAttempts, windowMinutes * 60);
+  if (!mem.allowed) {
+    return {
+      allowed: false,
+      remaining: 0,
+      waitMinutes: Math.max(1, Math.ceil(mem.resetSeconds / 60)),
+    };
+  }
+
+  try {
+    const windowStart = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
+    const rows = await db
+      .select({ id: authAttempts.id, attemptedAt: authAttempts.attemptedAt })
+      .from(authAttempts)
+      .where(
+        and(
+          eq(authAttempts.target, target),
+          eq(authAttempts.ipHash, ipHash),
+          eq(authAttempts.success, false),
+          gte(authAttempts.attemptedAt, windowStart)
+        )
+      )
+      .orderBy(desc(authAttempts.attemptedAt));
+
+    if (rows.length >= maxAttempts) {
+      const oldestInWindow = rows[rows.length - 1];
+      const expiry = new Date(oldestInWindow.attemptedAt).getTime() + windowMinutes * 60 * 1000;
+      const waitMinutes = Math.max(1, Math.ceil((expiry - Date.now()) / 60000));
+      return { allowed: false, remaining: 0, waitMinutes };
+    }
+
+    return { allowed: true, remaining: maxAttempts - rows.length };
+  } catch {
+    // If DB is unavailable, fail open to in-memory tier rather than crashing
+    return { allowed: mem.allowed, remaining: mem.remaining };
+  }
+}
+
+/**
+ * Records an authentication attempt (success or failure) in the database for distributed rate limiting.
+ */
+export async function recordPersistentAuthAttempt(
+  target: "login" | "signup",
+  ipHash: string,
+  success: boolean
+): Promise<void> {
+  try {
+    await db.insert(authAttempts).values({
+      id: generateId(),
+      target,
+      ipHash,
+      success,
+    });
+  } catch (err) {
+    console.error("recordPersistentAuthAttempt error:", err);
+  }
 }

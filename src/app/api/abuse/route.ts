@@ -4,7 +4,6 @@ import { abuseReports, qrCodes } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { generateId, hashIpDaily } from "@/lib/security/crypto";
 import { checkRateLimit } from "@/lib/security/rate-limit";
-import { runMigrations } from "@/db/migrate";
 import { z } from "zod";
 
 /**
@@ -46,8 +45,6 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await runMigrations();
-
     const [qr] = await db
       .select({ id: qrCodes.id })
       .from(qrCodes)

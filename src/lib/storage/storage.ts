@@ -1,6 +1,9 @@
 import crypto from "crypto";
 import { sanitizeFilename } from "../utils";
 
+import path from "path";
+import fs from "fs";
+
 export interface StorageObjectMetadata {
   storageKey: string;
   sizeBytes: number;
@@ -15,6 +18,33 @@ export interface PresignedUploadUrlResponse {
   headers?: Record<string, string>;
 }
 
+const LOCAL_STORAGE_DIR = path.join(process.cwd(), ".local_storage");
+
+type StorageDriver = "supabase" | "local";
+
+function getStorageDriver(): StorageDriver {
+  if (process.env.R2_ACCOUNT_ID || process.env.R2_ACCESS_KEY_ID || process.env.R2_SECRET_ACCESS_KEY || process.env.R2_BUCKET_NAME) {
+    throw new Error("R2 driver is not implemented. Use Supabase Storage.");
+  }
+
+  const isProd = process.env.NODE_ENV === "production";
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const bucket = process.env.SUPABASE_STORAGE_BUCKET;
+
+  if (url && key && bucket) {
+    return "supabase";
+  }
+
+  if (isProd) {
+    throw new Error(
+      "Production storage misconfiguration: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_STORAGE_BUCKET must be configured. Local storage fallback is disabled in production."
+    );
+  }
+
+  return "local";
+}
+
 function getSupabaseConfig() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -27,6 +57,14 @@ function getSupabaseConfig() {
   }
 
   return { url, key, bucket };
+}
+
+function resolveLocalPath(storageKey: string): string | null {
+  if (!isValidStorageKey(storageKey)) return null;
+  const target = path.resolve(LOCAL_STORAGE_DIR, storageKey);
+  const normalizedRoot = path.resolve(LOCAL_STORAGE_DIR) + path.sep;
+  if (!target.startsWith(normalizedRoot)) return null;
+  return target;
 }
 
 function getObjectUrl(storageKey: string): string {
@@ -75,7 +113,7 @@ export async function getPresignedUploadUrl(
   maxSizeBytes: number,
   expiresInSeconds = 300
 ): Promise<PresignedUploadUrlResponse> {
-  getSupabaseConfig();
+  getStorageDriver();
 
   return {
     uploadUrl: `/api/uploads/direct?key=${encodeURIComponent(storageKey)}`,
@@ -92,6 +130,22 @@ export async function putObject(
   buffer: Buffer,
   mimeType: string
 ): Promise<StorageObjectMetadata> {
+  const driver = getStorageDriver();
+
+  if (driver === "local") {
+    const localPath = resolveLocalPath(storageKey);
+    if (!localPath) throw new Error("Invalid storage key path");
+    await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
+    await fs.promises.writeFile(localPath, buffer);
+    const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
+    return {
+      storageKey,
+      sizeBytes: buffer.length,
+      mimeType,
+      checksum,
+    };
+  }
+
   const response = await fetch(getObjectUrl(storageKey), {
     method: "POST",
     headers: {
@@ -124,6 +178,18 @@ export async function putObject(
 export async function getObject(
   storageKey: string
 ): Promise<Buffer | null> {
+  const driver = getStorageDriver();
+
+  if (driver === "local") {
+    const localPath = resolveLocalPath(storageKey);
+    if (!localPath) return null;
+    try {
+      return await fs.promises.readFile(localPath);
+    } catch {
+      return null;
+    }
+  }
+
   const response = await fetch(getObjectUrl(storageKey), {
     method: "GET",
     headers: getHeaders(),
@@ -146,6 +212,19 @@ export async function getObject(
 export async function deleteObject(
   storageKey: string
 ): Promise<boolean> {
+  const driver = getStorageDriver();
+
+  if (driver === "local") {
+    const localPath = resolveLocalPath(storageKey);
+    if (!localPath) return false;
+    try {
+      await fs.promises.unlink(localPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   const response = await fetch(getObjectUrl(storageKey), {
     method: "DELETE",
     headers: getHeaders(),
@@ -160,4 +239,4 @@ export async function deleteObject(
   }
 
   return true;
-    }
+}

@@ -5,7 +5,6 @@ import { db } from "@/db";
 import { textContent, urlContent } from "@/db/schema";
 import { generateId } from "@/lib/security/crypto";
 import { z } from "zod";
-import { runMigrations } from "@/db/migrate";
 
 const schema = z.discriminatedUnion("contentType", [
   z.object({
@@ -55,8 +54,6 @@ export async function POST(
   }
 
   try {
-    await runMigrations();
-
     // Create new content version (this IS the entire replacement mechanism — Blueprint §21)
     const newVersion = await replaceQrContent(id, user.id);
 

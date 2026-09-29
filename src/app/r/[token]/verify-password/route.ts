@@ -77,11 +77,21 @@ export async function POST(
   // Timing-safe password verification (Blueprint §23)
   const valid = await verifyPassword(parsed.data.password, rules.passwordHash);
 
+  // Record attempt in database for persistent serverless tracking
+  const { hashIpDaily } = await import("@/lib/security/crypto");
+  const ipHash = ip !== "unknown" ? hashIpDaily(ip) : "unknown";
+  const { recordPersistentQrAttempt, checkPersistentQrLockout } = await import("@/lib/security/rate-limit");
+  await recordPersistentQrAttempt(qr.id, ipHash, valid);
+
   if (!valid) {
     const failResult = recordPasswordFailure(rateKey);
-    if (failResult.locked) {
+    const dbLockCheck = await checkPersistentQrLockout(qr.id, ipHash);
+    const isLocked = failResult.locked || dbLockCheck.locked;
+    const waitMinutes = failResult.waitMinutes ?? (dbLockCheck.remainingSeconds ? Math.ceil(dbLockCheck.remainingSeconds / 60) : 15);
+
+    if (isLocked) {
       return NextResponse.json(
-        { error: `Incorrect password. Account locked for ${failResult.waitMinutes} minutes.`, locked: true },
+        { error: `Incorrect password. Access locked for ${waitMinutes} minutes.`, locked: true },
         { status: 401 }
       );
     }

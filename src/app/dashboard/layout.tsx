@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
-import { runMigrations } from "@/db/migrate";
 import { LogoutButton } from "@/components/dashboard/logout-button";
 import { QrCode, Plus, User, Sparkles } from "lucide-react";
 import { constructNoIndexMetadata } from "@/lib/seo/metadata";
@@ -14,8 +13,6 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  await runMigrations();
-
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 

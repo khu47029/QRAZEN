@@ -6,7 +6,6 @@ import {
   getQrCodesByOwner,
 } from "@/lib/qr/queries";
 import { checkRateLimit } from "@/lib/security/rate-limit";
-import { runMigrations } from "@/db/migrate";
 import { db } from "@/db";
 import { textContent, urlContent } from "@/db/schema";
 import { generateId } from "@/lib/security/crypto";
@@ -33,7 +32,6 @@ export async function GET() {
   }
 
   try {
-    await runMigrations();
     const codes = await getQrCodesByOwner(user.id);
     return NextResponse.json({ codes });
   } catch (err) {
@@ -91,7 +89,6 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await runMigrations();
     const qrCode = await createQrCode({
       ownerId: user.id,
       name,

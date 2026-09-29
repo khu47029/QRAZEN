@@ -146,6 +146,22 @@ async function applyMigrations(): Promise<void> {
     )
   `);
 
+  // Auth attempts table (distributed serverless rate limiting for login/signup)
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS auth_attempts (
+      id TEXT PRIMARY KEY,
+      target TEXT NOT NULL,
+      ip_hash TEXT NOT NULL,
+      success BOOLEAN NOT NULL DEFAULT false,
+      attempted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+    )
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS idx_auth_attempts_target_ip
+    ON auth_attempts(target, ip_hash, attempted_at)
+  `);
+
   // Subscriptions table
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS subscriptions (
@@ -178,6 +194,35 @@ async function applyMigrations(): Promise<void> {
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS idx_abuse_qr
     ON abuse_reports(qr_code_id)
+  `);
+
+  // Sessions table
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+      expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+      last_active_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+      user_agent TEXT,
+      ip_hash TEXT
+    )
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_id
+    ON sessions(user_id)
+  `);
+
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash
+    ON sessions(token_hash)
+  `);
+
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires_at
+    ON sessions(expires_at)
   `);
 
   // Audit log table

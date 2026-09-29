@@ -133,6 +133,15 @@ export const passwordAttempts = pgTable("password_attempts", {
   success: boolean("success").notNull().default(false),
 });
 
+// ─── auth_attempts (login/signup rate limiting across serverless) ──────────────
+export const authAttempts = pgTable("auth_attempts", {
+  id: text("id").primaryKey(),
+  target: text("target").notNull(), // e.g. "login" or "signup"
+  ipHash: text("ip_hash").notNull(),
+  success: boolean("success").notNull().default(false),
+  attemptedAt: timestamp("attempted_at", { mode: "string" }).notNull().defaultNow(),
+});
+
 // ─── subscriptions ───────────────────────────────────────────────────────────
 export const subscriptions = pgTable("subscriptions", {
   id: text("id").primaryKey(),
@@ -175,9 +184,26 @@ export const auditLog = pgTable("audit_log", {
   createdAt: timestamp("created_at", { mode: "string" }).notNull().defaultNow(),
 });
 
+// ─── sessions ────────────────────────────────────────────────────────────────
+// Server-side session store with SHA-256 token hash indexing
+export const sessions = pgTable("sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: timestamp("created_at", { mode: "string" }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { mode: "string" }).notNull(),
+  lastActiveAt: timestamp("last_active_at", { mode: "string" }).notNull().defaultNow(),
+  userAgent: text("user_agent"),
+  ipHash: text("ip_hash"),
+});
+
 // ─── Type exports ─────────────────────────────────────────────────────────────
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+export type Session = typeof sessions.$inferSelect;
+export type InsertSession = typeof sessions.$inferInsert;
 export type QrCode = typeof qrCodes.$inferSelect;
 export type InsertQrCode = typeof qrCodes.$inferInsert;
 export type ContentVersion = typeof contentVersions.$inferSelect;
@@ -189,6 +215,8 @@ export type UrlContent = typeof urlContent.$inferSelect;
 export type AccessRules = typeof accessRules.$inferSelect;
 export type QrScan = typeof qrScans.$inferSelect;
 export type PasswordAttempt = typeof passwordAttempts.$inferSelect;
+export type AuthAttempt = typeof authAttempts.$inferSelect;
+export type InsertAuthAttempt = typeof authAttempts.$inferInsert;
 export type AbuseReport = typeof abuseReports.$inferSelect;
 export type InsertAbuseReport = typeof abuseReports.$inferInsert;
 export type AuditLog = typeof auditLog.$inferSelect;
